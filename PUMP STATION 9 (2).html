@@ -1,0 +1,407 @@
+<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><title>PUMP STATION 9</title>
+<style>
+html,body{margin:0;height:100%;background:#000}
+body{display:flex;flex-direction:column;align-items:center;justify-content:center;font:12px monospace;color:#888;padding:env(safe-area-inset-top,0) 0 env(safe-area-inset-bottom,0);box-sizing:border-box}
+canvas{width:min(96vw,106vh);aspect-ratio:4/3;image-rendering:pixelated;background:#000}
+p{margin:8px 0 0;text-align:center}
+</style></head><body>
+<canvas id="c" width="320" height="200"></canvas>
+<p>ARROWS TURN AND MOVE. A D STRAFE. CTRL OR CLICK FIRE. SPACE USE. 1-4 WEAPON. TAB MAP. ESC OR P MENU. M MUTE.</p>
+<script>
+// ---- CONSTANTS
+const W=320,H=200,VH=160,TICK=35,PLANE=.66,TURN=.07,ACC=.05,FRIC=.82,RAD=.2,DOOR_SPEED=.03,DOOR_WAIT=140,ENEMY_SPEED=.05,SIGHT=14,PLAYER_HP=100;
+const DM=[.5,.8,1.2,1.6]; // enemy damage per skill
+const SKILLS=["NIGHT SHIFT","OVERTIME","DOUBLE SHIFT","NO LUNCH BREAK"];
+const WR=[{n:"WRENCH",d:3,r:14,rng:1.3},{n:"PISTOL",d:2,r:12,a:"b",rng:30},{n:"SHOTGUN",d:2,r:32,a:"s",pel:5,rng:30},{n:"RIVET GUN",d:2,r:5,a:"b",rng:30}];
+
+// ---- PALETTE (64 entries, every pixel comes from here)
+const PAL="000000,1a1a1a,2e2e2e,444444,5c5c5c,787878,949494,b4b4b4,d0d0d0,f0f0f0,0c1a0c,183018,244824,306030,3c7840,4c9050,6ca868,2c1408,441e0c,5c2c10,7c3c18,9c5020,b8682c,d08a44,3a3a30,54544a,6e6e60,8a8a78,a6a692,400808,700c0c,a01010,d01818,f04040,6c5c00,a89000,e0c800,fff040,102050,1c3c88,3060c8,60a0f0,0c2c30,184850,24707c,40a0a8,5c3828,8c5c44,c08c6c,e0b898,2c2038,483860,b04020,e08030,283c28,405840,586c4c,704848,905c50,487868,68989c,383848,585870,8888a8".split(",").map(h=>parseInt(h,16));
+const RGB=PAL.map(v=>[v>>16,v>>8&255,v&255]);
+const near=(r,g,b)=>{let m=0,bd=1e9;RGB.forEach((d,i)=>{const e=(d[0]-r)**2+(d[1]-g)**2+(d[2]-b)**2;if(e<bd){bd=e;m=i}});return m};
+// SH[level][color] gives a darker palette entry. Five discrete bands.
+const SH=[1,.82,.64,.48,.34].map(f=>RGB.map(c=>near(c[0]*f,c[1]*f,c[2]*f)));
+const RED=RGB.map(c=>near(c[0]*.5+110,c[1]*.35,c[2]*.35));
+const P32=PAL.map(v=>(0xFF000000|(v&255)<<16|(v>>8&255)<<8|v>>16)>>>0);
+const REDM=new Map(P32.map((v,i)=>[v,P32[RED[i]]]));
+const DIMM=new Map(P32.map((v,i)=>[v,P32[SH[3][i]]]));
+
+// ---- TAB ICON, a red valve wheel drawn from the same palette as everything else
+(function(){const c=document.createElement("canvas");c.width=c.height=32;const g=c.getContext("2d"),f=(a,b,w,h,i)=>{g.fillStyle="#"+PAL[i].toString(16).padStart(6,"0");g.fillRect(a*2,b*2,w*2,h*2)};
+for(let j=0;j<16;j++)for(let i=0;i<16;i++){const d=Math.hypot(i-7.5,j-7.5);f(i,j,1,1,d>7.6?1:d>6.4?29:d>4?32:(i==7||i==8||j==7||j==8)?31:15)}
+f(6,6,4,4,36);f(4,4,1,1,33);const l=document.createElement("link");l.rel="icon";l.href=c.toDataURL();document.head.appendChild(l)})();
+// ---- SCREEN, FONT, DRAW HELPERS
+const cv=document.getElementById("c"),ctx=cv.getContext("2d"),img=ctx.createImageData(W,H),buf=new Uint32Array(img.data.buffer);
+const rnd=n=>Math.random()*n|0;
+const CH=" 0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ%!-.";
+const G="0000000000,3E5149453E,00427F4000,4261514946,2141454B31,1814127F10,2745454539,3C4A494930,0171090503,3649494936,064949291E,7E1111117E,7F49494936,3E41414122,7F4141221C,7F49494941,7F09090901,3E4149497A,7F0808087F,00417F4100,2040413F01,7F08142241,7F40404040,7F020C027F,7F0408107F,3E4141413E,7F09090906,3E4151215E,7F09192946,4649494931,01017F0101,3F4040403F,1F2040201F,3F4038403F,6314081463,0708700807,6151494543,2313086462,00005F0000,0808080808,0060600000".split(",").map(h=>[0,1,2,3,4].map(i=>parseInt(h.substr(i*2,2),16)));
+function rect(x,y,w,h,c){const v=P32[c];for(let j=Math.max(0,y);j<Math.min(H,y+h);j++)for(let i=Math.max(0,x);i<Math.min(W,x+w);i++)buf[j*W+i]=v}
+function txt(s,x,y,c,z=1){s=String(s).toUpperCase();for(const ch of s){const g=G[CH.indexOf(ch)];if(g)for(let i=0;i<5;i++)for(let j=0;j<7;j++)if(g[i]>>j&1)rect(x+i*z,y+j*z,z,z,c);x+=6*z}}
+const ctr=(s,y,c,z=1)=>txt(s,(W-String(s).length*6*z)>>1,y,c,z);
+
+// ---- TEXTURES (64x64, painted with rects plus noise)
+function mkTex(f){const t=new Uint8Array(4096);const R=(x,y,w,h,c)=>{for(let j=y;j<y+h;j++)for(let i=x;i<x+w;i++)if(i>=0&&i<64&&j>=0&&j<64)t[j*64+i]=c};f(R);for(let i=0;i<4096;i++)if(Math.random()<.1)t[i]=SH[1][t[i]];return t}
+const TX=[null,
+mkTex(R=>{R(0,0,64,64,27);for(let y=0;y<4;y++){R(0,y*16,64,2,24);for(let x=(y&1)*16;x<64;x+=32)R(x,y*16,2,16,24)}R(44,0,4,34,25);R(46,30,2,10,24);R(8,40,10,24,26)}),
+mkTex(R=>{R(0,0,64,64,15);R(0,30,64,3,12);R(30,0,3,64,12);for(const[x,y]of[[3,3],[58,3],[3,58],[58,58]])R(x,y,3,3,13);for(let i=0;i<30;i++)R(rnd(60),rnd(60),2+rnd(6),2+rnd(4),i&1?20:21);R(0,58,64,6,19);for(let x=0;x<64;x+=3)R(x,50+rnd(6),3,8,20)}),
+mkTex(R=>{R(0,0,64,64,26);R(0,6,64,12,4);R(0,8,64,2,7);R(0,16,64,2,2);R(0,30,64,10,21);R(0,31,64,2,23);R(0,38,64,2,18);R(40,40,12,24,4);R(42,40,2,24,7);R(36,36,20,4,2);R(8,0,3,6,3)}),
+mkTex(R=>{R(0,0,64,64,12);R(3,3,58,58,15);R(3,3,58,2,16);R(22,10,20,20,2);R(24,12,16,16,43);R(31,12,2,16,2);R(24,19,16,2,2);R(8,34,48,2,12);R(50,36,6,10,36);R(0,60,64,4,19)}),
+mkTex(R=>{R(0,0,64,64,1);for(let y=0;y<64;y++)for(let x=0;x<64;x++)if((x+y)>>3&1)R(x,y,1,1,36);R(12,18,40,28,3);R(14,20,36,24,39);R(24,26,16,12,40);R(28,30,8,4,9)}),
+mkTex(R=>{R(0,0,64,64,26);R(0,0,64,3,24);for(let y=0;y<64;y++)for(let x=0;x<64;x++){const d=Math.hypot(x-32,y-32);if(d<21&&d>16)R(x,y,1,1,32)}R(30,10,4,44,31);R(10,30,44,4,31);R(28,28,8,8,35);R(0,56,64,8,25)}),
+mkTex(R=>{R(0,0,64,64,27);R(14,8,36,48,8);R(14,8,36,2,7);R(18,12,28,5,31);for(let i=0;i<6;i++)R(18,22+i*5,18+rnd(8),2,4);R(30,50,10,3,5)}),
+mkTex(R=>{R(0,0,64,64,25);for(let i=0;i<9;i++)R(rnd(60),0,2+rnd(3),20+rnd(40),i&1?24:43);R(0,50,64,14,24)}),
+mkTex(R=>{R(0,0,64,64,3);R(4,4,56,56,5);R(31,4,2,56,1);R(24,0,16,3,36);R(46,28,6,6,32)})];
+TX.push(mkTex(R=>{R(0,0,64,64,1);for(let y=0;y<64;y++)for(let x=0;x<64;x++)if((x+y)>>3&1)R(x,y,1,1,32);R(12,18,40,28,3);R(14,20,36,24,30);R(24,26,16,12,32);R(28,30,8,4,9)}));
+
+// Floor tile. Subtle cracks and a half cell grid, nothing loud.
+const FL=mkTex(R=>{R(0,0,64,64,25);R(0,0,64,1,24);R(0,0,1,64,24);R(0,32,64,1,24);R(32,0,1,64,24);for(let i=0;i<10;i++)R(rnd(60),rnd(60),2+rnd(5),1,24);R(rnd(40),rnd(40),14,10,26);R(rnd(48),20+rnd(30),8,6,24)});
+// ---- SPRITES (64x64, 255 = clear, auto 1px dark outline)
+function mk64(f){const t=new Uint8Array(4096).fill(255);const R=(x,y,w,h,c)=>{for(let j=y;j<y+h;j++)for(let i=x;i<x+w;i++)if(i>=0&&i<64&&j>=0&&j<64)t[j*64+i]=c};f(R);const o=t.slice();for(let y=0;y<64;y++)for(let x=0;x<64;x++)if(t[y*64+x]==255&&[[1,0],[-1,0],[0,1],[0,-1]].some(([a,b])=>{const X=x+a,Y=y+b;return X>=0&&X<64&&Y>=0&&Y<64&&t[Y*64+X]!=255}))o[y*64+x]=1;return o}
+function hum(k,p){return mk64(R=>{const b=k==2?30:k?5:14,hd=k==2?48:k?7:60,e=k==2?36:k?32:36;
+if(k==3){const o=p==3?4:0,by=[22,22,22,22,30,42,54][p],cl=p==2?-8:0,dd=p>=4;
+R(12+o,by+8,40,10,52);R(16+o,by+4,32,16,52);R(20+o,by,24,5,53);R(20+o,by+9,24,2,29);R(20+o,by+14,24,2,29);
+if(dd){R(22+o,by+10,8,2,1);R(34+o,by+10,8,2,1)}else{R(22+o,by+5,9,9,9);R(33+o,by+5,9,9,9);R(25+o,by+8,4,4,1);R(36+o,by+8,4,4,1)}
+R(4+o,by+8+cl,12,7,36);R(48+o,by+8+cl,12,7,36);R(6+o,by+8+cl,4,3,37);R(50+o,by+8+cl,4,3,37);
+for(let i=0;i<3;i++){const w=p==1&&i&1?2:0;R(6+o,by+18+i*4+w,12,2,29);R(46+o,by+18+i*4-w,12,2,29)}
+if(p==2)R(27+o,by+15,10,4,32);return}
+if(p>=4){const w=[0,0,0,0,26,34,44][p],h=[0,0,0,0,26,14,8][p];R(32-w/2-4|0,62,w+8,2,k==2?31:43);R(32-w/2|0,64-h,w,h,b);R(32-w/2+4|0,64-h+2,w-8,2,SH[1][b]);R(p>4?32+w/2-10:22,64-h-(p==4?8:0),10,10,hd);R(p>4?32+w/2-6:26,64-h-(p==4?5:-2),2,2,1);return}
+const L=p==1?3:0,A=p==2?-14:0,o=p==3?5:0;
+if(k==0){R(22+o,44,8,18-L,12);R(34+o,44,8,18+L,12);R(20+o,60-L,11,4,2);R(33+o,60+L,11,4,2);R(18+o,20,28,26,13);R(18+o,20,28,3,12);R(30+o,22,4,22,12);R(21+o,26,6,8,60);R(38+o,28,5,7,59);R(20+o,38,24,3,35);R(10+o,22+A,8,20,13);R(46+o,22+A,8,20,13);R(10+o,40+A,8,6,60);R(46+o,40+A,8,6,60);R(25+o,7,14,14,60);R(25+o,16,14,5,43);R(23+o,3,18,6,36);R(26+o,1,12,3,36);R(28+o,12,3,3,1);R(34+o,12,3,3,1);R(29+o,13,1,1,37);R(35+o,13,1,1,37);R(29+o,18,6,2,1);R(26+o,46,1,8,43);R(40+o,50,1,6,43)}
+else if(k==1){R(20+o,44,9,16-L,5);R(35+o,44,9,16+L,5);R(18+o,58-L,13,6,2);R(33+o,58+L,13,6,2);R(16+o,18,32,28,5);R(16+o,18,32,3,7);R(16+o,43,32,3,3);R(22+o,24,20,14,3);for(let i=0;i<4;i++)R(24+o,26+i*3,16,1,1);R(18+o,21,4,4,32);R(42+o,21,4,4,36);R(8+o,22+A,8,6,4);R(48+o,22+A,8,6,4);R(10+o,28+A,4,16,6);R(50+o,28+A,4,16,6);R(8+o,44+A,8,5,2);R(48+o,44+A,8,5,2);R(24+o,6,16,12,7);R(24+o,6,16,2,8);R(26+o,10,12,4,1);R(28+o,11,3,2,32);R(34+o,11,3,2,32);R(31+o,0,2,6,3);R(30+o,0,4,2,32);R(26+o,40,12,3,35)}
+else{R(18+o,46,10,18-L,19);R(36+o,46,10,18+L,19);R(16+o,60,14,4,2);R(34+o,60,14,4,2);R(10+o,16,44,32,30);R(10+o,16,44,4,31);R(14+o,22,36,22,29);for(let i=0;i<4;i++)R(16+o,24+i*5,32,2,31);R(28+o,26,8,12,32);R(2+o,18+A,10,10,30);R(52+o,18+A,10,10,30);R(2+o,28+A,8,22,29);R(54+o,28+A,8,22,29);R(0+o,48+A,10,6,36);R(54+o,48+A,10,6,36);R(22+o,2,20,16,48);R(22+o,12,20,6,47);R(24+o,6,5,4,32);R(35+o,6,5,4,32);R(27+o,14,10,2,1);R(14+o,0,6,12,36);R(44+o,0,6,12,36);R(12+o,0,4,4,35);R(48+o,0,4,4,35);R(14+o,32,3,16,5);R(47+o,34,3,14,5)}
+if(p==2){R(4+o,k==2?2:8,12,12,36);R(7+o,k==2?5:11,6,6,37)}})}
+const ES=[0,1,2,3].map(k=>[0,1,2,3,4,5,6].map(p=>hum(k,p)));
+const IS={
+barrel:mk64(R=>{R(18,22,28,40,20);R(18,28,28,3,2);R(18,48,28,3,2);R(20,22,24,3,22)}),
+lamp:mk64(R=>{R(31,0,2,8,3);R(10,8,44,6,9);R(12,14,40,2,8)}),
+column:mk64(R=>{R(24,0,16,64,26);R(22,0,20,4,27);R(22,60,20,4,27)}),
+med:mk64(R=>{R(16,44,32,18,9);R(30,46,4,14,32);R(24,51,16,4,32)}),
+bul:mk64(R=>{R(18,48,28,14,19);R(20,50,24,3,36);for(let i=0;i<3;i++)R(22+i*8,56,4,5,35)}),
+shl:mk64(R=>{R(18,48,28,14,31);R(22,50,6,10,36);R(32,50,6,10,36)}),
+key:mk64(R=>{R(22,42,12,12,40);R(26,46,4,4,39);R(32,48,16,4,40);R(42,52,4,6,40)}),
+gun2:mk64(R=>{R(8,54,48,5,3);R(8,58,22,5,20)}),
+gun3:mk64(R=>{R(14,48,36,12,5);R(16,44,10,4,4)}),
+arm:mk64(R=>{R(18,36,28,24,15);R(22,32,6,6,15);R(36,32,6,6,15);R(24,40,16,4,13);R(30,40,4,20,12)}),
+life:mk64(R=>{R(22,40,20,20,40);R(26,44,12,12,41);R(30,46,4,8,9)}),
+rkey:mk64(R=>{R(22,42,12,12,32);R(26,46,4,4,31);R(32,48,16,4,32);R(42,52,4,6,32)}),
+bolt:mk64(R=>{R(21,21,22,22,52);R(26,26,12,12,36);R(29,29,6,6,37)})};
+function wsp(w,f){return mk64(R=>{
+if(w==0){const o=[0,-10,-20,-8][f];R(34+o,26,6,38,3);R(26+o,20,22,10,4);R(26+o,20,22,2,7)}
+if(w==1){const s=f>=2?2:0;R(29,34,8,30,3);R(26,28+s,14,10,4);R(29,24,8,6,2);if(f==1){R(26,10,14,14,36);R(30,12,6,8,37)}}
+if(w==2){const p=f==2?6:f==3?3:0;R(24,24,16,40,3);R(22,22,20,6,4);R(20,46+p,24,10,20);if(f==1){R(20,6,24,18,36);R(26,10,12,10,37)}}
+if(w==3){R(18,34,28,30,5);R(26,16,12,22,4);R(22,40,20,4,2);R(46,40,8,24,3);if(f==1)R(24,6,16,12,36)}})}
+const WS=[0,1,2,3].map(w=>[0,1,2,3].map(f=>wsp(w,f)));
+
+// ---- SOUND (11 kHz, 8-bit quantized)
+let ac=null,SND={},MUTE=false;
+function initAudio(){if(ac)return;try{ac=new(window.AudioContext||window.webkitAudioContext)()}catch(e){return}
+const mk=(d,f)=>{const n=11025*d|0,b=ac.createBuffer(1,n,11025),a=b.getChannelData(0);for(let i=0;i<n;i++)a[i]=Math.round(f(i/11025)*127)/127;return b};
+const nz=()=>Math.random()*2-1,sq=(f,t)=>Math.sin(6.283*f*t)>0?.8:-.8;
+SND={pist:mk(.2,t=>nz()*Math.exp(-t*28)),shot:mk(.4,t=>nz()*Math.exp(-t*9)),swing:mk(.15,t=>nz()*.5*Math.sin(t*20)),door:mk(.45,t=>sq(50+t*30,t)*.6),pick:mk(.2,t=>sq(t<.1?500:750,t)*.6),alert:mk(.25,t=>sq(220-t*400,t)*.6),pain:mk(.15,t=>sq(140,t)*(nz()>-.5?1:.3)),die:mk(.6,t=>sq(160-t*220,t)*Math.exp(-t*3)),
+hurt:mk(.25,t=>(sq(180-t*400,t)*.6+nz()*.4)*Math.exp(-t*6)),
+wal:mk(.3,t=>sq(90+Math.sin(t*40)*30,t)*.5*Math.exp(-t*4)),wpa:mk(.18,t=>sq(120-t*200,t)*.6*Math.exp(-t*5)),wdi:mk(.7,t=>sq(110-t*120,t)*Math.exp(-t*3)*(nz()>-.3?1:.4)),
+aal:mk(.25,t=>sq(t<.12?600:800,t)*.5),apa:mk(.15,t=>nz()*.7*Math.exp(-t*20)+sq(300,t)*.2),adi:mk(.6,t=>(nz()*.6+sq(200-t*300,t)*.4)*Math.exp(-t*4)),zap:mk(.25,t=>sq(900-t*3000,t)*.6*Math.exp(-t*6)),
+cal:mk(.25,t=>sq(700+Math.sin(t*90)*200,t)*.5*Math.exp(-t*4)),cbi:mk(.15,t=>nz()*Math.exp(-t*25)+sq(200,t)*.3),cdi:mk(.3,t=>sq(500-t*1200,t)*Math.exp(-t*8)),
+bro:mk(.8,t=>(sq(50+Math.sin(t*30)*10,t)*.7+nz()*.3)*Math.exp(-t*2.2)),bfi:mk(.35,t=>(sq(70-t*60,t)+nz()*.4)*.7*Math.exp(-t*5)),bdi:mk(1.2,t=>(sq(60-t*40,t)*.7+nz()*.4)*Math.exp(-t*2))}}
+let mus=null,musG=null;
+// Eight bar loop of square bass, square lead and noise hats, 8-bit quantized
+// One track per area. Each level transposes the set up two semitones.
+const TRK=[{bpm:110,root:[45,45,48,43],ld:[0,3,7,3,5,3,0,-2],hat:8,d:.5},{bpm:140,root:[40,40,43,38],ld:[0,0,3,0,7,5,3,0],hat:12,d:.25},{bpm:90,root:[47,46,45,44],ld:[0,1,0,-1,0,1,3,1],hat:5,d:.125},{bpm:165,root:[38,38,41,36],ld:[0,7,3,7,5,7,3,0],hat:14,d:.5}],MB={};
+let cz=-1,OS=0,AM=false,PZ=false,HITS=[],HM=0,PM=0,PCT=false,PL=0;
+const ZR=[[[0,0,7,6,2],[7,0,24,6,3],[0,6,24,13,1]],[[0,0,10,6,2],[10,0,24,6,3],[0,6,24,12,1]],[[0,0,10,10,2],[10,0,24,10,3],[0,10,24,17,1]]];
+// Objective waypoints per level. Each step advances when the player gets within 1.4 cells.
+const OBJ=[[["GO THROUGH THE DOOR NORTH",4.5,13.5],["GO TO THE KEY ROOM DOOR",3.5,6.5],["GET THE BLUE KEY",3.5,2.5],["GO TO THE BLUE DOOR",14.5,6.5],["TAKE THE ELEVATOR AND PRESS SPACE",22.5,3.5]],
+[["GO UP THROUGH A DOOR",11.5,18.5],["GO WEST TO THE DOOR",7.5,15.5],["GO NORTH TO THE HALL",4.5,12.5],["GO TO THE KEY ROOM",5.5,6.5],["GET THE RED KEY",5.5,2.5],["GO TO THE RED DOOR",16.5,6.5],["TAKE THE ELEVATOR AND PRESS SPACE",22.5,3.5]],
+[["LEAVE THE START ROOM",3.5,17.5],["GO EAST TO THE DOOR",19.5,17.5],["GET THE BLUE KEY",21.5,19.5],["GO TO THE BLUE DOOR",4.5,10.5],["GET THE RED KEY",5.5,2.5],["GO TO THE RED DOOR",16.5,10.5],["KILL THE BOSS AND TAKE THE ELEVATOR",22.5,5.5]]];
+function zone(){for(const[a,b,c,d,z]of ZR[L])if(P.x>=a&&P.x<c&&P.y>=b&&P.y<d)return z;return 0}
+function getM(l,z){const k=l+"-"+z;if(MB[k])return MB[k];const q=TRK[z];
+const sr=11025,spb=sr*60/q.bpm/2|0,n=spb*64,b=ac.createBuffer(1,n,sr),a=b.getChannelData(0),sh=l*2,fr=m=>440*2**((m+sh-69)/12),sq=(f,t,u=.5)=>(f*t)%1<u?1:-1;
+for(let i=0;i<n;i++){const st=i/spb|0,ph=i%spb/spb,t=i/sr,r=q.root[st>>4&3];let v=sq(fr(r),t)*.4;if(st&1)v+=(Math.random()*2-1)*Math.exp(-ph*q.hat)*.3;else v+=sq(fr(r+12+q.ld[st%8]),t,q.d)*.2*(1-ph);if(z==3&&st%4==2)v+=(Math.random()*2-1)*Math.exp(-ph*6)*.3;a[i]=Math.round(v*.8*127)/127}
+MB[k]=b;return b}
+function music(l,z=0){if(!ac)return;try{mus&&mus.stop()}catch(e){}
+mus=ac.createBufferSource();mus.buffer=getM(l,z);mus.loop=true;musG=ac.createGain();musG.gain.value=MUTE?0:.18;mus.connect(musG);musG.connect(ac.destination);mus.start()}
+// Positional sound. Volume falls off with distance and pans left or right by bearing.
+function play(n,x,y){if(!ac||MUTE||!SND[n])return;const s=ac.createBufferSource(),g=ac.createGain();s.buffer=SND[n];let v=1,pn=0;if(x!==undefined){const dx=x-P.x,dy=y-P.y;v=Math.max(0,1-Math.hypot(dx,dy)/20);pn=Math.sin(Math.atan2(dy,dx)-P.a)}if(v<=0)return;g.gain.value=v;s.connect(g);let o=g;if(ac.createStereoPanner){const p=ac.createStereoPanner();p.pan.value=pn*.8;g.connect(p);o=p}o.connect(ac.destination);s.start()}
+
+// ---- LEVEL DATA
+// Route check. Start room (3,15) -> door (4,13) -> hall -> door (3,6) -> key room holds BLUE KEY at (3.5,2.5)
+// -> back to hall -> blue door (14,6) -> exit room -> elevator in east wall at (23,3).
+// Doors (20,13) (6,17) (14,17) are plain and make loops. Secret wall at (9,22) hides a closet in the south.
+const CM={"#":1,s:2,p:3,v:6,n:7,w:8,D:20,B:21,S:22,R:23,E:9};
+const LV=[{r:[
+"####p###v###n###w#######",
+"#......#...............#",
+"#......#...............#",
+"#......#...............E",
+"#......#...............#",
+"#......#...............#",
+"###D##########B#########",
+"#......................#",
+"#......ss......ss......#",
+"#......ss......ss......#",
+"#......................#",
+"#......pp......pp......#",
+"#......pp......pp......#",
+"####D###############D###",
+"#.....#.......#........#",
+"#.....#.......#........#",
+"#.....#.......#........#",
+"#.....D.......D........#",
+"#.....#.......#........#",
+"#.....#.......#........#",
+"#.....#.......#........#",
+"#.....#.......#........#",
+"#########S##############",
+"#######.....############",
+"####w####p####v####n####"],
+s:[3.5,15.5,-Math.PI/2],
+e:[["w",5.5,2.5],["key",3.5,2.5],["lamp",3.5,3.5],["barrel",1.5,4.5],["w",11.5,10.5],["w",18.5,9.5],["bul",1.5,10.5],["arm",19.5,7.5],["med",11.5,7.5],["lamp",12.5,10.5],
+["a",15.5,3.5],["w",19.5,2.5],["med",9.5,4.5],["bul",20.5,4.5],["column",12.5,2.5],["shl",21.5,1.5],["bul",1.5,20.5],["lamp",3.5,18.5],
+["w",10.5,18.5],["gun2",8.5,15.5],["bul",12.5,20.5],["a",19.5,18.5],["med",22.5,20.5],["w",16.5,15.5],["barrel",22.5,14.5],["gun3",9.5,23.5],["shl",8.5,23.5],["med",10.5,23.5],["life",11.5,23.5]],sec:1},
+// LEVEL 2 route check. Start in the lower tunnel -> south rooms -> doors (4,12) or (20,12) -> hall -> plain door (5,6)
+// -> key room holds RED KEY (5.5,2.5) -> hall -> red door (16,6) -> exit room -> exit (23,5). Secret wall (11,23) hides a closet.
+{r:[
+"####p###v###n###w#######",
+"#.........#............#",
+"#.........#............#",
+"#.........#............E",
+"#.........#............#",
+"#.........#............#",
+"#####D##########R#######",
+"#......................#",
+"#........vvvvvv........#",
+"#........vppppv........#",
+"#........wwwwww........#",
+"#......................#",
+"####D###############D###",
+"#......#........#......#",
+"#......#........#......#",
+"#......D........D......#",
+"#......#........#......#",
+"#......#........#......#",
+"###D#######D########D###",
+"#......................#",
+"#..ss..............ss..#",
+"#..ss..............ss..#",
+"#......................#",
+"###########S############",
+"#########.....##########",
+"####w####p####v####n####"],
+s:[6.5,21.5,0],
+e:[["w",14.5,20.5],["a",10.5,21.5],["c",16.5,21.5],["c",6.5,19.5],["bul",1.5,22.5],["med",21.5,22.5],["lamp",8.5,20.5],["barrel",2.5,19.5],["shl",21.5,19.5],
+["w",4.5,15.5],["bul",1.5,13.5],["c",2.5,16.5],["a",11.5,14.5],["shl",14.5,16.5],["med",9.5,13.5],["column",12.5,15.5],["w",19.5,14.5],["arm",21.5,16.5],["bul",17.5,17.5],
+["w",3.5,9.5],["a",20.5,9.5],["w",11.5,7.5],["med",6.5,11.5],["bul",17.5,11.5],["lamp",11.5,11.5],
+["rkey",5.5,2.5],["w",3.5,4.5],["w",8.5,3.5],["bul",1.5,1.5],["barrel",9.5,1.5],["lamp",5.5,4.5],
+["a",17.5,2.5],["a",20.5,4.5],["w",13.5,4.5],["med",12.5,1.5],["shl",21.5,1.5],["column",16.5,3.5],["c",19.5,1.5],
+["life",9.5,24.5],["arm",11.5,24.5],["shl",10.5,24.5],["med",12.5,24.5]],sec:1},
+// LEVEL 3 route check. Start room (3,18) -> door (3,17) -> hall -> door (19,17) -> east room holds BLUE KEY (21.5,19.5)
+// -> hall -> blue door (4,10) -> west room holds RED KEY (5.5,2.5) -> hall -> red door (16,10) -> boss room -> exit (23,5).
+// Doors (6,20) and (14,20) are plain loops. Secret wall (10,22) hides a closet.
+{r:[
+"####p###v###n###w#######",
+"#.........#............#",
+"#.........#............#",
+"#.........#............#",
+"#.........#............#",
+"#.........#............E",
+"#.........#............#",
+"#.........#............#",
+"#.........#............#",
+"#.........#............#",
+"####B###########R#######",
+"#......................#",
+"#......................#",
+"#......ss......ss......#",
+"#......ss......ss......#",
+"#......................#",
+"#......................#",
+"###D###############D####",
+"#.....#.......#........#",
+"#.....#.......#........#",
+"#.....D.......D........#",
+"#.....#.......#........#",
+"##########S#############",
+"#######.....############",
+"####w####p####v####n####"],
+s:[3.5,19.5,-Math.PI/2],
+e:[["bul",1.5,21.5],["lamp",4.5,19.5],["w",6.5,12.5],["w",12.5,15.5],["a",19.5,12.5],["w",20.5,15.5],["med",11.5,11.5],["bul",1.5,11.5],["arm",12.5,16.5],["lamp",11.5,13.5],
+["rkey",5.5,2.5],["w",3.5,6.5],["a",7.5,4.5],["bul",8.5,8.5],["med",1.5,8.5],["lamp",5.5,5.5],["barrel",2.5,2.5],
+["b",17.5,3.5],["a",13.5,6.5],["a",21.5,8.5],["med",12.5,1.5],["bul",21.5,1.5],["shl",12.5,8.5],["column",14.5,3.5],["column",20.5,6.5],["lamp",16.5,6.5],
+["w",10.5,20.5],["c",9.5,19.5],["c",13.5,16.5],["bul",12.5,21.5],["gun2",8.5,18.5],
+["key",21.5,19.5],["a",17.5,20.5],["w",16.5,18.5],["med",22.5,21.5],["shl",15.5,21.5],["barrel",22.5,18.5],
+["gun3",9.5,23.5],["shl",8.5,23.5],["med",10.5,23.5],["life",11.5,23.5]],sec:1}];
+
+// ---- GAME STATE
+let S="title",MI=0,SM=1,SK=1,L=0,lives=3,score=0,MW=24,MH=25,M,DR,E,IT,PR,P,T=0,kills=0,secrets=0,totK=1,MSG={s:"",t:0},noise=false,USE=0,dT=0,tallyT=0;
+const K={},Z=new Float32Array(W);
+const HB=[...Array(300)].map(()=>[rnd(W),160+rnd(40),rnd(2)]);
+let dX=1,dY=0,pX=0,pY=PLANE;
+const msg=s=>MSG={s,t:90};
+function loadLevel(i){const l=LV[i];MH=l.r.length;M=new Uint8Array(MW*MH);DR={};
+l.r.forEach((row,y)=>[...row].forEach((ch,x)=>{const v=CM[ch]||0;M[y*MW+x]=v;if(v==20||v==21||v==23)DR[y*MW+x]={o:0,s:0,t:0}}));
+E=[];IT=[];PR=[];for(const[n,x,y]of l.e){if(n=="w"||n=="a"||n=="b"||n=="c")E.push({k:n=="a"?1:n=="b"?2:n=="c"?3:0,x,y,hp:n=="a"?10:n=="b"?40:n=="c"?3:4,st:"idle",t:0});else IT.push({n,x,y})}
+P={x:l.s[0],y:l.s[1],a:l.s[2],vx:0,vy:0,hp:PLAYER_HP,keys:0,w:1,has:[1,1,i,i],am:{b:20+i*30,s:i*10},arm:0,ox:l.s[0],oy:l.s[1],oa:l.s[2],af:0,tint:0,grin:0,look:0};
+T=0;kills=0;secrets=0;totK=E.length;MSG={s:["FIND THE BLUE KEY","FIND THE RED KEY","FIND BOTH KEYS"][i],t:120};OS=0;HITS=[];if(ac)[0,1,2,3].forEach(z=>getM(i,z));cz=zone();music(i,cz)}
+
+// ---- COLLISION AND LINE OF SIGHT
+function sol(x,y){if(x<0||y<0||x>=MW||y>=MH)return true;const i=(y|0)*MW+(x|0),c=M[i];return c?(c==20||c==21||c==23)?DR[i].o<.7:true:false}
+const blk=(x,y)=>sol(x-RAD,y-RAD)||sol(x+RAD,y-RAD)||sol(x-RAD,y+RAD)||sol(x+RAD,y+RAD);
+function los(x0,y0,x1,y1){const n=Math.hypot(x1-x0,y1-y0)/.2|0;for(let i=1;i<n;i++){const t=i/n;if(sol(x0+(x1-x0)*t,y0+(y1-y0)*t))return false}return true}
+function wallDist(a,r){const c=Math.cos(a),s=Math.sin(a);for(let d=.1;d<r;d+=.1)if(sol(P.x+c*d,P.y+s*d))return d;return r}
+
+// ---- COMBAT
+function hurt(n,s){if(s)HITS.push({a:Math.atan2(s.y-P.y,s.x-P.x),t:30});const m=Math.max(1,n*DM[SK]|0),ab=Math.min(P.arm,m>>1);P.arm-=ab;P.hp-=m-ab;P.tint=12;P.look=rnd(3)-1;play("hurt")}
+function hurtE(e,d){e.hp-=d;e.fl=5;HM=5;if(e.st=="idle")wake(e);if(e.hp<=0){e.st="dead";e.t=0;e.dead=1;kills++;score+=100*(e.k+1);play(["wdi","adi","bdi","cdi"][e.k],e.x,e.y)}else if(rnd(100)<65){e.st="pain";e.t=0;play(["wpa","apa","bfi","cal"][e.k],e.x,e.y)}}
+function wake(e){e.st="chase";e.t=0;play(["wal","aal","bro","cal"][e.k],e.x,e.y)}
+function fire(){const w=WR[P.w];if(w.a){if(P.am[w.a]<=0){msg("NO AMMO");return}P.am[w.a]--}
+P.af=1;play(P.w==0?"swing":P.w==2?"shot":"pist");if(P.w)noise=true;
+for(let n=0;n<(w.pel||1);n++){const a=P.a+(w.pel?(Math.random()-.5)*.25:P.w?(Math.random()-.5)*.03:0),wd=wallDist(a,w.rng),c=Math.cos(a),s=Math.sin(a);let best=null,bd=wd;
+for(const e of E){if(e.dead)continue;const dx=e.x-P.x,dy=e.y-P.y,al=dx*c+dy*s;if(al>0&&al<bd&&Math.abs(-dx*s+dy*c)<.3){bd=al;best=e}}
+if(best)hurtE(best,w.d)}}
+function eShoot(e,d){const dx=P.x-e.x,dy=P.y-e.y;if(!e.k)play("pist",e.x,e.y);if(e.k==3){play("cbi",e.x,e.y);if(d<1.5){hurt(4+rnd(5),e)}return}if(e.k){const n=e.k==2?3:1;for(let i=0;i<n;i++){const a=Math.atan2(dy,dx)+(i-(n-1)/2)*.25;PR.push({x:e.x,y:e.y,dx:Math.cos(a)*.18,dy:Math.sin(a)*.18})}play(e.k==2?"bfi":"zap",e.x,e.y)}else if(los(e.x,e.y,P.x,P.y)&&rnd(100)<65){hurt(3+rnd(7),e)}}
+function eUpd(e){if(e.fl>0)e.fl--;if(e.st=="dead"){e.t++;return}
+const dx=P.x-e.x,dy=P.y-e.y,d=Math.hypot(dx,dy);
+if(e.st=="idle"){if((d<SIGHT&&los(e.x,e.y,P.x,P.y))||(noise&&d<18))wake(e);return}
+e.t++;
+if(e.st=="pain"){if(e.t>8){e.st="chase";e.t=0}return}
+if(e.st=="attack"){if(e.t==10)eShoot(e,d);if(e.t>22){e.st="chase";e.t=0}return}
+if(e.t%100==50&&rnd(100)<40)play(["wal","aal","bro","cal"][e.k],e.x,e.y);if(d>.9){const sp=ENEMY_SPEED*(e.k==3?1.7:e.k?.8:1),nx=e.x+dx/d*sp,ny=e.y+dy/d*sp;const j=(ny|0)*MW+(nx|0);if(DR[j]&&M[j]==20&&DR[j].s==0){DR[j].s=1;play("door")}if(!sol(nx,e.y))e.x=nx;if(!sol(e.x,ny))e.y=ny}
+if(d<(e.k==3?1.5:8)&&e.t>(e.k==3?8:20)&&rnd(100)<(e.k==2?14:e.k==3?40:6)&&los(e.x,e.y,P.x,P.y)){e.st="attack";e.t=0}}
+
+// ---- TICK
+function tick(){if(PZ)return;
+if(S=="dead"){dT++;if(dT>80){lives--;if(lives<=0)S="over";else{loadLevel(L);S="play"}}return}
+if(S!="play")return;
+T++;noise=false;P.ox=P.x;P.oy=P.y;P.oa=P.a;
+if(K.ArrowLeft)P.a-=TURN;if(K.ArrowRight)P.a+=TURN;
+const c=Math.cos(P.a),s=Math.sin(P.a);let ax=0,ay=0;
+if(K.ArrowUp||K.KeyW){ax+=c;ay+=s}if(K.ArrowDown||K.KeyS){ax-=c;ay-=s}if(K.KeyA){ax+=s;ay-=c}if(K.KeyD){ax-=s;ay+=c}
+P.vx=P.vx*FRIC+ax*ACC;P.vy=P.vy*FRIC+ay*ACC;
+if(!blk(P.x+P.vx,P.y))P.x+=P.vx;if(!blk(P.x,P.y+P.vy))P.y+=P.vy;if(sol(P.x,P.y)){P.x=P.ox;P.y=P.oy}
+if(P.af){P.af++;if(P.af>WR[P.w].r)P.af=0}
+if((K.ControlLeft||K.ControlRight||K.mouse)&&!P.af)fire();
+{const z=zone();if(z!=cz){cz=z;music(L,z)}}{const st=OBJ[L][OS];if(st&&OS<OBJ[L].length-1&&Math.hypot(st[1]-P.x,st[2]-P.y)<1.4)OS++}if(P.tint>0)P.tint--;for(const h of HITS)h.t--;HITS=HITS.filter(h=>h.t>0);if(HM>0)HM--;if(P.grin>0)P.grin--;if(MSG.t>0)MSG.t--;if(T%50==0)P.look=rnd(5)==0?rnd(3)-1:0;
+if(USE){USE=0;let i=0,v=0;for(const d of[.7,1.1,1.5])for(const o of[0,.35,-.35]){const j=((P.y+Math.sin(P.a+o)*d)|0)*MW+((P.x+Math.cos(P.a+o)*d)|0),u=M[j];if(!v&&(u==9||u==22||u==20||u==21||u==23)){i=j;v=u}}
+if(v==20||v==21||v==23){if(v==21&&!(P.keys&1))msg("YOU NEED THE BLUE KEY");else if(v==23&&!(P.keys&2))msg("YOU NEED THE RED KEY");else if(DR[i].s==0||DR[i].s==3){DR[i].s=1;play("door")}}
+else if(v==22){M[i]=0;secrets++;msg("SECRET!");play("door")}
+else if(v==9){S="tally";tallyT=T/TICK|0;score+=500}}
+for(const k in DR){const d=DR[k],x=k%MW,y=k/MW|0,inside=(Math.abs(P.x-x-.5)<.85&&Math.abs(P.y-y-.5)<.85)||E.some(e=>!e.dead&&(e.x|0)==x&&(e.y|0)==y),c=M[k],near=Math.hypot(P.x-x-.5,P.y-y-.5)<1.1;
+if(near&&(d.s==0||d.s==3)){const need=c==21?1:c==23?2:0;if(!need||P.keys&need){d.s=1;play("door")}else if(MSG.t==0)msg(c==21?"YOU NEED THE BLUE KEY":"YOU NEED THE RED KEY")}
+if(d.s==1){d.o+=DOOR_SPEED;if(d.o>=1){d.o=1;d.s=2;d.t=0}}
+else if(d.s==2){if(++d.t>DOOR_WAIT&&!inside)d.s=3}
+else if(d.s==3){if(inside)d.s=1;else{d.o-=DOOR_SPEED;if(d.o<=0){d.o=0;d.s=0}}}}
+for(const it of IT){if(it.got||Math.hypot(it.x-P.x,it.y-P.y)>.6)continue;let ok=true;
+switch(it.n){case"med":if(P.hp<PLAYER_HP){P.hp=Math.min(PLAYER_HP,P.hp+25);P.grin=40}else ok=false;break;
+case"bul":P.am.b+=12;break;case"arm":if(P.arm<100){P.arm=Math.min(100,P.arm+50);msg("ARMOR")}else ok=false;break;case"life":lives++;msg("EXTRA LIFE");break;case"shl":P.am.s+=6;break;
+case"key":P.keys|=1;msg("GOT THE BLUE KEY");break;case"rkey":P.keys|=2;msg("GOT THE RED KEY");break;
+case"gun2":P.has[2]=1;P.am.s+=4;P.w=2;msg("SHOTGUN");break;
+case"gun3":P.has[3]=1;P.am.b+=20;P.w=3;msg("RIVET GUN");break;
+default:ok=false}
+if(ok){it.got=1;play("pick");score+=10}}
+for(const e of E)eUpd(e);
+for(let i=PR.length-1;i>=0;i--){const q=PR[i];q.x+=q.dx;q.y+=q.dy;if(sol(q.x,q.y))PR.splice(i,1);else if(Math.hypot(q.x-P.x,q.y-P.y)<.4){hurt(5+rnd(6),q);PR.splice(i,1)}}
+if(P.hp<=0){S="dead";dT=0;P.hp=0;play("die")}}
+
+// ---- INPUT
+onkeydown=e=>{initAudio();if(/^(Arrow|Space|Control|Tab)/.test(e.code))e.preventDefault();if(e.repeat)return;K[e.code]=1;press(e.code)};
+onkeyup=e=>{K[e.code]=0};document.onpointerlockchange=()=>{if(!document.pointerLockElement&&S=="play"&&!PZ){PZ=true;PM=0;PCT=false;PL=performance.now()}};document.onvisibilitychange=()=>{if(document.hidden&&S=="play"){PZ=true;PM=0;PCT=false}};
+cv.onmousedown=()=>{initAudio();K.mouse=1;if(S=="play")try{cv.requestPointerLock()}catch(e){}};onmouseup=()=>K.mouse=0;
+onmousemove=e=>{if(document.pointerLockElement==cv&&S=="play"){const d=Math.max(-80,Math.min(80,e.movementX))*.003;P.a+=d;P.oa+=d}};
+onwheel=e=>{if(S!="play")return;let w=P.w;for(let n=0;n<4;n++){w=(w+(e.deltaY>0?1:3))%4;if(P.has[w]){P.w=w;break}}};
+function press(k){const ok=k=="Enter"||k=="Space",up=k=="ArrowUp"||k=="KeyW",dn=k=="ArrowDown"||k=="KeyS";
+if(S=="play"&&(k=="KeyP"||k=="Escape")){if(k=="Escape"&&performance.now()-PL<250)return;PZ=!PZ;PM=0;PCT=false;if(PZ&&document.exitPointerLock)document.exitPointerLock();return}
+if(S=="play"&&PZ){if(PCT){if(ok)PCT=false;return}const n=pmi().length;if(up)PM=(PM+n-1)%n;if(dn)PM=(PM+1)%n;if(ok)pauseSel();return}
+if(k=="Tab")AM=!AM;if(k=="KeyM"){MUTE=!MUTE;if(musG)musG.gain.value=MUTE?0:.18}
+if(S=="title"){if(up)MI=(MI+2)%3;if(dn)MI=(MI+1)%3;if(ok){if(MI==0)S="skill";else S=MI==1?"controls":"quit"}}
+else if(S=="skill"){if(up)SM=(SM+3)%4;if(dn)SM=(SM+1)%4;if(ok){SK=SM;lives=3;score=0;L=0;loadLevel(0);S="play"}}
+else if(S=="play"){if(k=="Space")USE=1;if(/^Digit[1-4]$/.test(k)){const w=+k[5]-1;if(P.has[w])P.w=w}if(k=="Escape")S="title"}
+else if(S=="tally"){if(ok){if(L+1<LV.length){L++;loadLevel(L);S="play"}else S="end"}}
+else S="title"}
+
+// ---- RENDER
+function ray(rdx,rdy){let mx=P.x|0,my=P.y|0,ddx=Math.abs(1/rdx),ddy=Math.abs(1/rdy),sx,sy,sdx,sdy,side=0,c=1,pd=1e3,wx=0,ix=0;
+if(rdx<0){sx=-1;sdx=(P.x-mx)*ddx}else{sx=1;sdx=(mx+1-P.x)*ddx}
+if(rdy<0){sy=-1;sdy=(P.y-my)*ddy}else{sy=1;sdy=(my+1-P.y)*ddy}
+for(let n=0;n<64;n++){if(sdx<sdy){sdx+=ddx;mx+=sx;side=0}else{sdy+=ddy;my+=sy;side=1}
+if(mx<0||my<0||mx>=MW||my>=MH){c=1;pd=1e3;break}
+c=M[my*MW+mx];if(!c)continue;
+pd=side?sdy-ddy:sdx-ddx;wx=side?P.x+pd*rdx:P.y+pd*rdy;wx-=Math.floor(wx);
+if((c==20||c==21||c==23)&&wx<DR[my*MW+mx].o)continue;ix=my*MW+mx;break}
+return[pd,side,c,wx,ix]}
+function dspr(im,wx,wy,z=1,tn=0){const dx=wx-P.x,dy=wy-P.y,det=pX*dY-dX*pY,tx=(dY*dx-dX*dy)/det,ty=(pX*dy-pY*dx)/det;if(ty<.25)return;
+const sc=W/2*(1+tx/ty)|0,sz=VH/ty*z|0,x0=sc-(sz>>1),y0=((VH+VH/ty)/2|0)-sz,lv=Math.min(4,ty/3.5|0);
+for(let x=Math.max(0,x0);x<Math.min(W,x0+sz);x++){if(ty>=Z[x])continue;const u=(x-x0)*64/sz|0;
+for(let y=Math.max(0,y0);y<Math.min(VH,y0+sz);y++){const c=im[((y-y0)*64/sz|0)*64+u];if(c!=255)buf[y*W+x]=P32[SH[lv][tn?RED[c]:c]]}}}
+function face(x,y){const R=(a,b,w,h,c)=>rect(x+a,y+b,w,h,c),d=S=="dead"||P.hp<=0,s=Math.min(4,(PLAYER_HP-P.hp)/20|0),lk=P.look;
+R(0,0,24,24,d?6:48);R(0,0,24,6,19);R(0,6,3,10,19);R(21,6,3,10,19);
+if(d){R(5,9,5,1,1);R(7,8,1,3,1);R(14,9,5,1,1);R(16,8,1,3,1)}else{R(5,9,5,3,9);R(14,9,5,3,9);R(6+lk,10,2,2,1);R(15+lk,10,2,2,1)}
+if(P.grin>0&&!d)R(7,17,10,4,9);else R(8,17,8,2,d?1:31);
+if(s>0)R(2,12,3,3,32);if(s>1)R(16,4,2,8,32);if(s>2)R(8,19,6,3,32);if(s>3)R(10,0,5,10,32);if(d)R(4,14,2,10,32)}
+function hud(){rect(0,160,W,40,3);for(const[x,y,c]of HB)rect(x,y,2,1,c?2:4);rect(0,160,W,2,6);rect(0,162,W,1,1);
+const w=WR[P.w],lab=(s,x,v,c=37)=>{txt(s,x,165,6);txt(v,x,177,c)};
+lab("LEVEL",6,L+1);lab("SCORE",40,score);lab("LIVES",92,lives);lab("HEALTH",186,P.hp+"%",P.hp<30?32:37);lab("AMMO",238,w.a?P.am[w.a]:"-");
+txt("KEYS",280,165,6);if(P.keys&1)rect(284,177,8,7,40);if(P.keys&2)rect(294,177,8,7,32);
+txt(w.n,6,189,8);txt("ARMOR "+P.arm,186,189,6);txt("KILLS "+kills,70,189,6);rect(144,160,32,40,2);face(148,168)}
+// Automap on TAB. Secret walls look like plain walls.
+function amap(){const X=88,Y=2,s=6;rect(X-2,Y-2,MW*s+4,MH*s+4,1);for(let y=0;y<MH;y++)for(let x=0;x<MW;x++){const c=M[y*MW+x];rect(X+x*s,Y+y*s,s-1,s-1,c?c==9?36:c==21?40:c==23?32:c==20?15:4:2)}
+const o=OBJ[L][OS];if(o&&(T>>3&1))rect(X+o[1]*s-2|0,Y+o[2]*s-2|0,4,4,37);
+for(const e of E)if(!e.dead)rect(X+e.x*s|0,Y+e.y*s|0,2,2,32);
+rect(X+P.x*s-1|0,Y+P.y*s-1|0,3,3,9);rect(X+(P.x+dX*.8)*s|0,Y+(P.y+dY*.8)*s|0,1,1,33)}
+// Pause menu items and actions.
+const pmi=()=>["RESUME","RESTART LEVEL","AUTOMAP "+(AM?"ON":"OFF"),"MUSIC "+(MUTE?"OFF":"ON"),"CONTROLS","RETURN TO TITLE"];
+function pauseSel(){if(PM==0)PZ=false;else if(PM==1){PZ=false;loadLevel(L)}else if(PM==2)AM=!AM;else if(PM==3){MUTE=!MUTE;if(musG)musG.gain.value=MUTE?0:.18}else if(PM==4)PCT=true;else{PZ=false;S="title"}}
+// Radar. Rotates with the player so up is forward. Shows walls, monsters and incoming bolts.
+// Monsters that have not noticed you are yellow, awake ones are red, and the boss is bigger.
+function radar(){const X=10,Y=26,N=44,s=3,h=N/2,ca=Math.cos(P.a),sa=Math.sin(P.a);rect(X-1,Y-1,N+2,N+2,1);
+for(let j=0;j<N;j++)for(let i=0;i<N;i++){const u=(i-h)/s,v=(h-j)/s;buf[(Y+j)*W+X+i]=P32[sol(P.x-u*sa+v*ca,P.y+u*ca+v*sa)?4:2]}
+const dot=(x,y,z,c)=>{const dx=x-P.x,dy=y-P.y,px=h+(-dx*sa+dy*ca)*s,py=h-(dx*ca+dy*sa)*s;if(px>1&&px<N-2&&py>1&&py<N-2)rect(X+px-z/2|0,Y+py-z/2|0,z,z,c)};
+for(const e of E)if(!e.dead)dot(e.x,e.y,e.k==2?5:3,e.st=="idle"?35:32);for(const q of PR)dot(q.x,q.y,2,37);
+rect(X+h-1,Y+h-1,3,3,9);rect(X+h,Y+h-4,1,3,37)}
+// Camera is interpolated between ticks so motion stays smooth at any frame rate.
+function drawGame(){const rx=P.x,ry=P.y,ra=P.a;if(S=="play"){P.x=P.ox+(rx-P.ox)*AL;P.y=P.oy+(ry-P.oy)*AL;P.a=P.oa+(ra-P.oa)*AL}drawG();P.x=rx;P.y=ry;P.a=ra;if(PZ){for(let i=0;i<W*H;i++)buf[i]=DIMM.get(buf[i])||buf[i];rect(70,24,180,112,1);rect(72,26,176,108,2);ctr("PAUSED",30,36,2);if(PCT)["ARROWS OR WASD MOVE","CTRL OR CLICK FIRE","SPACE USE","1-4 OR WHEEL WEAPON","TAB MAP  M MUTE","P OR ESC RESUME"].forEach((s,i)=>ctr(s,56+i*12,8));else pmi().forEach((s,i)=>txt((i==PM?"- ":"  ")+s,92,56+i*12,i==PM?36:8));if(!PCT)ctr("ESC OR P RESUME",124,6)}}
+function drawG(){
+for(let y=0;y<80;y++)buf.fill(P32[3],y*W,y*W+W);
+dX=Math.cos(P.a);dY=Math.sin(P.a);pX=-dY*PLANE;pY=dX*PLANE;
+for(let y=80;y<VH;y++){const rd=VH/(2*(y-79.5)),sh=SH[Math.min(4,rd/3.5|0)],sx=rd*2*pX/W,sy=rd*2*pY/W;let fx=P.x+rd*(dX-pX),fy=P.y+rd*(dY-pY);for(let x=0;x<W;x++){buf[y*W+x]=P32[sh[FL[((fy*64&63)<<6)+(fx*64&63)]]];fx+=sx;fy+=sy}}
+dX=Math.cos(P.a);dY=Math.sin(P.a);pX=-dY*PLANE;pY=dX*PLANE;
+for(let x=0;x<W;x++){const cx=2*x/W-1,rdx=dX+pX*cx,rdy=dY+pY*cx,[pd,side,c,wx,ix]=ray(rdx,rdy);Z[x]=pd;
+const isD=c==20||c==21||c==23,tid=isD?(c==20?4:c==21?5:10):c==22?1:c,t=TX[tid];
+let tx=wx*64|0;
+if(isD)tx=Math.max(0,Math.min(63,(wx-DR[ix].o)*64|0));
+else if((side==0&&rdx>0)||(side==1&&rdy<0))tx=63-tx;
+const lh=VH/Math.max(pd,.05)|0,top=VH-lh>>1,y0=Math.max(0,top),y1=Math.min(VH,top+lh),lv=Math.min(4,(pd/3.5|0)+(side?0:1)),st=64/lh;let ty=(y0-top)*st;
+for(let y=y0;y<y1;y++){buf[y*W+x]=P32[SH[lv][t[(ty|0)*64+tx]]];ty+=st}}
+const SP=[];for(const e of E){const p=e.st=="dead"?4+Math.min(2,e.t/5|0):e.st=="attack"?2:e.st=="pain"?3:e.st=="chase"?(e.t>>3)&1:0;SP.push([ES[e.k][p],e.x,e.y,e.k==2?1.6:e.k==3?1.25:1,e.fl>0])}
+for(const it of IT)if(!it.got)SP.push([IS[it.n],it.x,it.y]);for(const q of PR)SP.push([IS.bolt,q.x,q.y]);
+SP.sort((a,b)=>((b[1]-P.x)**2+(b[2]-P.y)**2)-((a[1]-P.x)**2+(a[2]-P.y)**2));for(const s of SP)dspr(s[0],s[1],s[2],s[3],s[4]);
+if(S=="play"||P.hp>0){const f=P.af?1+Math.min(2,(P.af-1)*3/WR[P.w].r|0):0,im=WS[P.w][f];
+for(let y=0;y<64;y++)for(let x=0;x<64;x++){const c=im[y*64+x];if(c!=255){const X=64+x*3,Y=VH-192+y*3+48;if(Y+3>0&&Y<VH)for(let j=0;j<3;j++)for(let i=0;i<3;i++){const yy=Y+j;if(yy>=0&&yy<VH)buf[yy*W+X+i]=P32[c]}}}}
+if(P.tint>0||S=="dead")for(let i=0;i<W*VH;i++)buf[i]=REDM.get(buf[i])||buf[i];
+// Damage markers. Red bars on the screen edge show which side the attack came from.
+for(const h of HITS){const r=h.a-P.a,sn=Math.sin(r),cs=Math.cos(r),k=h.t>12||(h.t&2)?33:32;if(sn<-.3)rect(0,30,7,VH-60,k);if(sn>.3)rect(W-7,30,7,VH-60,k);if(cs>.3)rect(70,0,180,7,k);if(cs<-.3)rect(70,VH-7,180,7,k)}
+if(P.hp>0&&P.hp<30&&(T>>4&1)){rect(0,0,W,3,32);rect(0,VH-3,W,3,32);rect(0,0,3,VH,32);rect(W-3,0,3,VH,32)}
+if(HM>0){rect(154,74,3,3,37);rect(163,74,3,3,37);rect(154,85,3,3,37);rect(163,85,3,3,37)}
+if(MSG.t>0)ctr(MSG.s,4,37);
+const ob=OBJ[L][OS];if(ob){const a=Math.atan2(ob[2]-P.y,ob[1]-P.x)-P.a,dd=Math.hypot(ob[1]-P.x,ob[2]-P.y);rect(0,13,W,9,1);ctr(ob[0],14,36);rect(282,24,30,36,1);for(let i=0;i<=10;i++)rect(297+Math.sin(a)*i*1.2-1|0,40-Math.cos(a)*i*1.2-1|0,2,2,i>7?37:33);txt((dd|0)+"M",290,52,8)}
+radar();if(AM)amap();
+hud()}
+function drawMenu(){
+if(S=="title"||S=="skill"){rect(0,0,W,H,11);rect(0,0,W,70,12);rect(190,50,50,90,25);rect(188,46,54,6,27);rect(200,28,6,22,3);
+rect(20,90,150,60,26);rect(20,86,150,6,24);for(let i=0;i<5;i++)rect(34+i*28,100,14,18,43);rect(0,150,W,50,43);
+for(let i=0;i<40;i++)rect((i*53)%300,152+(i*29)%46,10+i%20,1,44);rect(60,120,8,30,21);rect(120,110,40,8,20);rect(240,100,6,50,4);
+ctr("PUMP STATION 9",12,36,3);ctr("EPISODE ONE",38,8);rect(86,120,148,72,1);rect(88,122,144,68,2);
+const it=S=="title"?["NEW GAME","CONTROLS","QUIT"]:SKILLS,sel=S=="title"?MI:SM;
+it.forEach((s,i)=>txt((i==sel?"- ":"  ")+s,100,130+i*14,i==sel?36:8))}
+else{rect(0,0,W,H,0);
+if(S=="controls"){["CONTROLS","","ARROWS OR W S MOVE","LEFT RIGHT TURN","A D STRAFE","CTRL OR CLICK FIRE","WALK UP TO DOORS TO OPEN THEM","SPACE PUSHES SECRET WALLS","1 2 3 4 SELECT WEAPON","MOUSE TURNS AFTER A CLICK","TAB MAP  M MUTE  P OR ESC MENU","","PRESS ANY KEY"].forEach((s,i)=>ctr(s,20+i*14,i?8:36))}
+if(S=="quit"){ctr("IT IS SAFE TO CLOSE THIS TAB",90,8)}
+if(S=="tally"){ctr("LEVEL "+(L+1)+" COMPLETE",30,36,2);ctr("KILLS "+(kills*100/totK|0)+"%",80,8);ctr("SECRETS "+secrets+" OF "+LV[L].sec,96,8);ctr("TIME "+(tallyT/60|0)+":"+("0"+tallyT%60).slice(-2).replace(/^/,""),112,8);ctr("SCORE "+score,128,37);ctr("PRESS ENTER",170,6)}
+if(S=="over"){ctr("YOU ARE OUT OF LIVES",90,32,1);ctr("PRESS ANY KEY",120,6)}
+if(S=="end"){ctr("END OF EPISODE ONE",70,36,2);ctr("FINAL SCORE "+score,110,37);ctr("PRESS ANY KEY",150,6)}}}
+function render(){if(S=="play"||S=="dead")drawGame();else drawMenu();ctx.putImageData(img,0,0)}
+
+// ---- MAIN LOOP (fixed 35 Hz tick)
+let last=performance.now(),acc=0,AL=0;
+function loop(t){acc=Math.min(acc+Math.max(0,t-last),100);last=t;while(acc>=1000/TICK){acc-=1000/TICK;tick()}AL=acc*TICK/1000;render();requestAnimationFrame(loop)}
+requestAnimationFrame(loop);
+</script></body></html>
